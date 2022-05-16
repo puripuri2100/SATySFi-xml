@@ -1,0 +1,43 @@
+;; For Satyrographos 0.0.2 series
+(version 0.0.2)
+
+;; Library declaration
+(library
+  ;; Library name
+  (name "xml")
+  ;; Library version
+  (version "1.0.0")
+  ;; Files
+  (sources
+    ((packageDir "src")))
+  ;; OPAM package file
+  (opam "satysfi-xml.opam")
+  ;; Dependency
+  (dependencies
+    ((dist ()) ; Standard library
+     (base ()) ; Base library
+    )))
+
+;; Library doc declaration
+(libraryDoc
+  ;; Library doc name
+  (name "xml-doc")
+  ;; Library version
+  (version "1.0.0")
+  ;; Working directory to build docs
+  (workingDirectory "doc")
+  ;; Build commands
+  (build
+    ;; Run SATySFi
+    ((satysfi "xml-ja.saty" "-o" "xml-ja.pdf")))
+  ;; Files
+  (sources
+    ((doc "xml-ja.pdf" "doc/xml-ja.pdf")))
+  ;; OPAM package file
+  (opam "satysfi-xml-doc.opam")
+  ;; Dependency
+  (dependencies
+    ((xml ()) ; the main library
+     (dist ()) ; Standard library
+     (base ()) ; Base library
+    )))

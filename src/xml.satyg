@@ -1,0 +1,572 @@
+@require: base/base
+@require: base/list-ext
+@require: base/int
+@require: base/option-ext
+
+
+
+
+type xml-text =
+  | XMLTextString of string
+  | XMLTextEntityValue of string % 実体参照
+
+
+
+% 参照の定義
+% https://www.w3.org/TR/REC-xml/#NT-EntityDecl
+type xml-entity-reference =
+  | XMLEntityReferenceString of string
+  | XMLEntityReferenceFile of string
+
+%%% https://www.w3.org/TR/REC-xml/#NT-ExternalID
+type xml-external-id =
+  | XMLExternalIDSystem of string
+  | XMLExternalIDPublic of string * string
+
+type xml-element =
+  | XMLTag of string * ((string * xml-text list) list) * (xml-element list) % 要素名 * 属性 * 子要素
+  | XMLText of xml-text % テキストもしくは実体参照
+  | XMLProcessingInstructions of string * ((string * xml-text list) list) % 処理命令
+  | XMLDocTypeDecl of string * (xml-external-id option) * ( list)
+
+type xml = xml-element list
+
+
+type xml-parser-error =
+  | XMLParserErrorUnExpectedChar of int * string
+  | XMLParserErrorUnExpectedString of int * int * string
+  | XMLParserErrorEOI
+
+
+module XML : sig
+
+  val parser : string -> xml xml-parser-error result
+  val printer : xml -> string
+
+end = struct
+
+
+  let empty-string = ` `
+  let space-string = #` `#
+
+
+  let str-join join-str str-lst =
+    let join i s1 s2 =
+      if i == 0 then
+        s2
+      else
+        s1 ^ join-str ^ s2
+    in
+    List.fold-lefti join empty-string str-lst
+
+
+  let string-to-list str =
+    let str-len = string-length str in
+    let-rec sub lst n =
+      if n <= 0 then
+        lst
+      else
+        let s = string-sub str (n - 1) 1 in
+        sub (s::lst) (n - 1)
+    in
+  sub [] str-len
+
+
+  %%% `<!--`が既に取り除かれた状態を想定
+  let-rec remove-comment pos uni-point-lst =
+    match uni-point-lst with
+    | 0x2D::0x2D::0x3E::xs -> (%%% `-->`
+      (pos + 3, xs)
+    )
+    | _::xs -> remove-comment (pos + 1) xs 
+    | [] -> (pos, [])
+
+
+  let is-digit-point x = 0x0030 <= x && x <= 0x0039
+
+  let is-hex-digit-point x =
+    0x0030 <= x && x <= 0x0039 ||
+    0x0041 <= x && x <= 0x0046 ||
+    0x0061 <= x && x <= 0x0066
+
+
+  let-rec get-digit pos digit-str uni-point-lst =
+    match uni-point-lst with
+    | [] -> (pos, digit-str, [])
+    | x::xs -> (
+      if is-digit-point x then
+        get-digit (pos + 1) (digit-str^(string-unexplode[x])) xs
+      else
+        (pos, digit-str, uni-point-lst)
+    )
+
+
+  let-rec get-hex-digit pos digit-str uni-point-lst =
+    match uni-point-lst with
+    | [] -> (pos, digit-str, [])
+    | x::xs -> (
+      if is-hex-digit-point x then
+        get-hex-digit (pos + 1) (digit-str^(string-unexplode[x])) xs
+      else
+        (pos, digit-str, uni-point-lst)
+    )
+
+
+  %%% nameに使われる文字列の制限
+  %%% https://www.w3.org/TR/REC-xml/#NT-NameStartChar
+  let is-name-start-char x =
+    0x3A == x %%% `:`
+    || 0x41 <= x && x <= 0x5A %%% [A-Z]
+    || 0x61 <= x && x <= 0x7A %%% [a-z]
+    || 0xC0 <= x && x <= 0xD6
+    || 0xD8 <= x && x <= 0xF6
+    || 0xF8 <= x && x <= 0x2FF
+    || 0x370 <= x && x <= 0x37D
+    || 0x37F <= x && x <= 0x1FFF
+    || 0x200C <= x && x <= 0x200D
+    || 0x2070 <= x && x <= 0x218F
+    || 0x2C00 <= x && x <= 0x2FEF
+    || 0x3001 <= x && x <= 0xD7FF
+    || 0xF900 <= x && x <= 0xFDCF
+    || 0xFDF0 <= x && x <= 0xFFFD
+    || 0x10000 <= x && x <= 0xEFFFF
+
+
+  %%% nameに使われる文字列の制限
+  %%% https://www.w3.org/TR/REC-xml/#NT-NameChar
+  let is-name-char x =
+    is-name-start-char x
+    || 0x2D == x %%% `-`
+    || 0x2E == x %%% `.`
+    || 0xB7 == x %%% `·`
+    || 0x30 <= x && x <= 0x39 %%% [0-9]
+    || 0x0300 <= x && x <= 0x036F
+    || 0x203F <= x && x <= 0x2040
+
+
+
+  %%% nameに該当するものを取得する関数
+  let-rec get-name is-start pos name uni-point-lst =
+    match uni-point-lst with
+    | [] -> (pos, name, [])
+    | x::xs -> (
+      if is-start then
+        if is-name-start-char x then
+          get-name false (pos+ 1) (name^(string-unexplode[x])) xs
+        else
+          (pos, name, uni-point-lst)
+      else
+        if is-name-char x then
+          get-name false (pos+ 1) (name^(string-unexplode[x])) xs
+        else
+          (pos, name, uni-point-lst)
+    )
+
+
+
+  let is-space-point x =
+    match x with
+    | 0x20 -> true % space
+    | 0x09 -> true % tab
+    | 0x0D -> true % CR
+    | 0x0A -> true % LF
+    | _ -> false
+
+
+  %%% スペース・改行を全て無視する関数
+  %%% ついでにコメントも削除しちゃう
+  let-rec remove-space pos uni-point-lst =
+    match uni-point-lst with
+    | [] -> (pos, [])
+    | 0x3C::0x21::0x2D::0x2D::xs -> (%%% `<!--`
+      let (pos, uni-point-lst) = remove-comment (pos + 4) xs in
+      remove-space pos uni-point-lst
+    )
+    | x::xs -> (
+      if is-space-point x then
+        remove-space (pos + 1) xs
+      else
+        (pos, uni-point-lst)
+    )
+
+
+  %%% `&`より後ろの部分を渡されると想定
+  %%% 文字に変換できるものは文字にしてXMLTextStringで返し、
+  %%% 普通の実体参照だった場合はXMLTextEntityValueで返す
+  %%% `;`で終わらない、など変なところがあったらErrで返す
+  let get-reference pos uni-point-lst =
+    match uni-point-lst with
+    %%% 0x0023 = `#`
+    %%% 0x0078 = `x`
+    %%% 0x003B = `;`
+    | 0x0023::0x0078::xs -> (
+      %%% 16進法による文字コード表記
+      let (pos, digit-str, lst) = get-digit pos empty-string xs in
+      let digit = Int.of-string ?:(16) digit-str in
+      match lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | 0x003B::ys -> Ok((pos + 1, XMLTextString(string-unexplode[digit]), ys))
+      | y::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[y]))
+    )
+    | 0x0023::xs -> (
+      %%% 10進法による文字コード表記
+      let (pos, hex-digit-str, lst) = get-hex-digit pos empty-string xs in
+      let digit = Int.of-string ?:(10) hex-digit-str in
+      match lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | 0x003B::ys -> Ok((pos + 1, XMLTextString(string-unexplode[digit]), ys))
+      | y::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[y]))
+    )
+    | x::xs when is-name-start-char x -> (
+      %%% 参照
+      let (pos, name, lst) = get-name true pos empty-string uni-point-lst in
+      let data =
+        match name with
+        | `lt` -> XMLTextString(`<`)
+        | `gt` -> XMLTextString(`>`)
+        | `amp` -> XMLTextString(`&`)
+        | `apos` -> XMLTextString(`'`)
+        | `quot` -> XMLTextString(`"`)
+        | _ -> XMLTextEntityValue(name)
+      in
+      match lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | 0x003B::ys -> Ok((pos + 1, data, ys))
+      | y::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[y]))
+
+    )
+    | [] -> Err(XMLParserErrorEOI)
+    | x::_ -> Err(XMLParserErrorUnExpectedChar(pos, string-unexplode[x]))
+
+
+  %%% `<![CDATA[`が既に取り除かれている想定
+  let-rec get-cdata-text pos stack uni-point-lst =
+    match uni-point-lst with
+    | [] -> Err(XMLParserErrorEOI)
+    | 0x5D::0x5D::0x3E::xs -> (%%% `]]>`
+      Ok(pos + 3, stack, xs)
+    )
+    | x::xs -> get-cdata-text (pos + 1) (stack^(string-unexplode[x])) xs
+
+
+  let get-literal is-quote pos uni-point-lst =
+    let-rec get-literal-sub pos xml-text-lst stack-str uni-point-lst =
+      match uni-point-lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | x::xs -> (
+        match x with
+        | 0x22 -> (%%% `"`
+          if is-quote then
+            if string-length stack-str == 0 then
+              Ok((pos + 1, List.reverse(xml-text-lst), xs))
+            else
+              Ok((pos + 1, List.reverse(XMLTextString(stack-str)::xml-text-lst), xs))
+          else
+            Err(XMLParserErrorUnExpectedChar(pos, `"`))
+        )
+        | 0x27 -> (%%% `'`
+          if not is-quote then
+            if string-length stack-str == 0 then
+              Ok((pos + 1, List.reverse(xml-text-lst), xs))
+            else
+              Ok((pos + 1, List.reverse(XMLTextString(stack-str)::xml-text-lst), xs))
+          else
+            Err(XMLParserErrorUnExpectedChar(pos, `'`))
+        )
+        | 0x26 -> (%%% `&`
+          match get-reference (pos + 1) xs with
+          | Err(e) -> Err(e)
+          | Ok((pos, xml-text, ys)) -> (
+            let lst =
+              if string-length stack-str == 0 then
+                xml-text::xml-text-lst
+              else
+                xml-text::XMLTextString(stack-str)::xml-text-lst
+            in
+            get-literal-sub pos lst empty-string ys
+          )
+        )
+        | _ -> get-literal-sub (pos + 1) xml-text-lst (stack-str^(string-unexplode[x])) xs
+      )
+    in
+    get-literal-sub pos [] empty-string uni-point-lst
+
+
+  let get-text-str pos uni-point-lst =
+    let-rec sub pos stack lst =
+      match lst with
+      | [] -> (pos, stack, [])
+      | 0x3C::0x21::0x5B::0x43::0x44::0x41::0x54::0x41::0x5B::xs -> (%%% `<![CDATA[`
+        match get-cdata-text (pos + 9) empty-string xs with
+        | Err(_) -> (pos, stack, lst)
+        | Ok(pos, str, uni-point-lst) -> sub pos (stack^str) uni-point-lst
+      )
+      | 0x26::_ -> (pos, stack, lst) %%% `&`
+      | 0x3C::_ -> (pos, stack, lst) %%% `<`
+      | 0x3E::_ -> (pos, stack, lst) %%% `>`
+      | 0x27::_ -> (pos, stack, lst) %%% `'`
+      | 0x22::_ -> (pos, stack, lst) %%% `"`
+      | x::xs -> sub (pos + 1) (stack^(string-unexplode[x])) xs
+    in
+    sub pos empty-string uni-point-lst
+
+
+
+  %%% `hoge = "hoge&amp;fuga"`
+  let get-attribute pos uni-point-lst =
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    let (pos, attribute-name, uni-point-lst) = get-name true pos empty-string uni-point-lst in
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    match uni-point-lst with
+    | [] -> Err(XMLParserErrorEOI)
+    | 0x3D::xs -> (%%% `=`
+      let (pos, uni-point-lst) = remove-space (pos + 1) xs in
+      match uni-point-lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | 0x22::ys -> (%%% `"`
+        match get-literal true (pos + 1) ys with
+        | Err(e) -> Err(e)
+        | Ok((pos, xml-text-lst, zs)) -> Ok((pos, (attribute-name, xml-text-lst), zs))
+      )
+      | 0x27::ys -> (%%% `'`
+        match get-literal false (pos + 1) ys with
+        | Err(e) -> Err(e)
+        | Ok((pos, xml-text-lst, zs)) -> Ok((pos, (attribute-name, xml-text-lst), zs))
+      )
+      | y::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[y]))
+    )
+    | x::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[x]))
+
+
+  %%% get-attributeを回し、Errが出たらストップし、それまでのattributeのリストを返す
+  let-rec get-attribute-lst pos attribute-lst uni-point-lst =
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    match get-attribute pos uni-point-lst with
+    | Err(_) -> (pos, List.reverse attribute-lst, uni-point-lst)
+    | Ok((pos, attribute, uni-point-lst)) -> get-attribute-lst pos (attribute::attribute-lst) uni-point-lst
+
+
+  let-rec get-children pos children uni-point-lst =
+    match uni-point-lst with
+    | [] -> (pos, List.reverse children, uni-point-lst)
+    | 0x3C::0x2F::xs -> (%%% `</`
+      (pos, List.reverse children, uni-point-lst)
+    )
+    | 0x3E::_ -> (%%% `>`
+      (pos, List.reverse children, uni-point-lst)
+    )
+    | 0x27::_ -> (%%% `'`
+      (pos, List.reverse children, uni-point-lst)
+    )
+    | 0x22::_ -> (%%% `"`
+      (pos, List.reverse children, uni-point-lst)
+    )
+    | 0x26::xs -> (%%% `&`
+      match get-reference pos xs with
+      | Err(_) -> (pos, List.reverse children, uni-point-lst)
+      | Ok(pos, text, uni-point-lst) -> get-children pos (XMLText(text)::children) uni-point-lst
+    )
+    | 0x3C::0x21::xs -> (%%% `<!`
+      match xs with
+      | 0x2D::0x2D::ys -> (%%% コメント 0x2D = `-`
+        let (pos, uni-point-lst) = remove-comment (pos + 2) ys in
+        get-children pos children uni-point-lst
+      )
+      | 0x5B::0x43::0x44::0x41::0x54::0x41::0x5B::ys -> (%%% `[CDATA[`
+        match get-cdata-text (pos + 9) empty-string ys with
+        | Err(_) -> (pos, List.reverse children, uni-point-lst)
+        | Ok(pos, str, uni-point-lst) -> get-children pos (XMLText(XMLTextString(str))::children) uni-point-lst
+      )
+      | _ -> (pos, List.reverse children, uni-point-lst) %%%!!! 後で！
+    )
+    | 0x3C::0x3F::xs -> (%%% `<?`
+      match parse-processing-instructions (pos + 2) xs with
+      | Err(_) -> (pos, List.reverse children, uni-point-lst)
+      | Ok(pos, element, ys) -> get-children pos (XMLProcessingInstructions(element)::children) ys
+    )
+    | 0x3C::xs -> (%%% `<`
+      match parse-xml-tag (pos + 1) xs with
+      | Err(_) -> (pos, List.reverse children, uni-point-lst)
+      | Ok(pos, tag, ys) -> get-children pos (XMLTag(tag)::children) ys
+    )
+    | _ -> (
+      let (pos, text-str, uni-point-lst) = get-text-str pos uni-point-lst in
+      get-children pos (XMLText(XMLTextString(text-str))::children) uni-point-lst
+    )
+
+
+  and parse-processing-instructions pos uni-point-lst =
+    %%% 例：
+    %%% <?xml-stylesheet type="text/css"?>
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    let (pos, element-name, uni-point-lst) = get-name true pos empty-string uni-point-lst in
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    let (pos, attribute-lst, uni-point-lst) = get-attribute-lst pos [] uni-point-lst in
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    match uni-point-lst with
+    | 0x3F::0x3E::xs -> (%%% `?>`
+      Ok(pos + 2, (element-name, attribute-lst), xs)
+    )
+    | [] -> Err(XMLParserErrorEOI)
+    | x::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[x]))
+
+
+  and parse-xml-tag pos uni-point-lst =
+    %%% 例：
+    %%% <tag-name hoge="hoge" fuga="fuga&amp;1"></tag-name>
+    %%% <tag-name hoge="hoge" fuga="fuga&amp;1" />
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    let (pos, tag-name, uni-point-lst) = get-name true pos empty-string uni-point-lst in
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    let (pos, attribute-lst, uni-point-lst) = get-attribute-lst pos [] uni-point-lst in
+    let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+    match uni-point-lst with
+    | [] -> Err(XMLParserErrorEOI)
+    | 0x2F::0x3E::xs -> (%%% `/>`のパターン
+      Ok(pos + 2, (tag-name, attribute-lst, []), xs)
+    )
+    | 0x3E::xs -> (%%% `>`のパターン
+      let (pos, uni-point-lst) = remove-space pos xs in
+      let (pos, children, uni-point-lst) = get-children pos [] uni-point-lst in
+      let (pos, uni-point-lst) = remove-space pos uni-point-lst in
+      match uni-point-lst with
+      | [] -> Err(XMLParserErrorEOI)
+      | 0x3C::0x2F::ys -> (%%% `</`
+        let (pos, end-tag-name, uni-point-lst) = get-name true (pos + 2) empty-string ys in
+        if string-same tag-name end-tag-name then
+          match uni-point-lst with
+          | 0x3E::zs -> Ok(pos, (tag-name, attribute-lst, children), zs)
+          | z::_ -> Err(XMLParserErrorUnExpectedChar(pos, string-unexplode[z]))
+          | [] -> Err(XMLParserErrorEOI)
+        else
+          let end-tag-name-len = string-length end-tag-name in
+          Err(XMLParserErrorUnExpectedString(pos, pos + end-tag-name-len, end-tag-name))
+      )
+      | y::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[y]))
+    )
+    | x::_ -> Err(XMLParserErrorUnExpectedChar(pos + 1, string-unexplode[x]))
+
+
+
+  let parser xml-str =
+    let-rec parser-sub pos xml-element-lst uni-point-lst =
+      match uni-point-lst with
+      | [] -> Ok(List.reverse xml-element-lst)
+      | x::xs -> (
+        match x with
+        | 0x003C -> (%%% `<`
+          match xs with
+          | [] -> Err(XMLParserErrorUnExpectedChar(pos, string-unexplode[x]))
+          | y::ys -> (
+            match y with
+            %%% `/`
+            | 0x002F -> Err(XMLParserErrorUnExpectedChar(pos + 2, `/`))
+            %%% `!`
+            | 0x0021 -> (
+              match ys with
+              | 0x2D::0x2D::zs -> (%%% コメント 0x2D = `-`
+                let (pos, uni-point-lst) = remove-comment (pos + 2) zs in
+                parser-sub pos xml-element-lst uni-point-lst
+              )
+              | _ -> (Ok([])) %%%!!!!!! 後でやる
+            )
+            %%% `?`
+            | 0x003F -> (
+              match parse-processing-instructions (pos + 2) ys with
+              | Err(e) -> Err(e)
+              | Ok(pos, element, zs) -> parser-sub pos (XMLProcessingInstructions(element)::xml-element-lst) zs
+            )
+            %%% `!`と`?`以外は全てタグ
+            | _ -> (
+              match parse-xml-tag pos xs with
+              | Err(e) -> Err(e)
+              | Ok(pos, tag, zs) -> parser-sub pos (XMLTag(tag)::xml-element-lst) zs
+            )
+          )
+        )
+        | x when is-space-point x -> parser-sub (pos + 1) xml-element-lst xs
+        %%% スペース・改行と`<`以外の文字は出現しない
+        | _ -> Err(XMLParserErrorUnExpectedChar(pos, string-unexplode[x]))
+      )
+    in
+    let uni-point-lst = string-explode xml-str in
+    parser-sub 1 [] uni-point-lst
+
+
+
+
+  let escape-string str =
+    let str-lst = string-to-list str in
+    str-lst
+    |> List.map (fun s -> (
+        match s with
+        | `&` -> `&amp;`
+        | `<` -> `&lt;`
+        | `>` -> `&gt;`
+        | `'` -> `&apos;`
+        | `"` -> `&quot;`
+        | _ -> s
+      ))
+    |> str-join empty-string
+
+
+  let print-literal literal-lst =
+    let-rec sub str lst =
+      match lst with
+      | [] -> str
+      | x::xs -> (
+        match x with
+        | XMLTextString(s) -> sub (str^(escape-string s)) xs
+        | XMLTextEntityValue(v) -> sub (str ^ `&`^v^`;`) xs
+      )
+    in
+    `"` ^ sub empty-string literal-lst ^ `"`
+
+
+
+  let printer xml =
+    let-rec printer-sub str xml-element-lst =
+      match xml-element-lst with
+      | [] -> str
+      | x::xs -> (
+        match x with
+        | XMLTag(name, attributes, children) -> (
+          let attribute-str =
+            if List.length attributes == 0 then
+              empty-string
+            else
+              attributes
+              |> List.map (fun (name, literals) -> (escape-string name)^`=`^(print-literal literals))
+              |> List.fold-left (fun s1 s2 -> s1^space-string^s2) empty-string
+          in
+          let children-str =
+            children
+            |> List.map (fun c -> printer-sub empty-string [c])
+            |> str-join empty-string
+          in
+          let escaped-name = escape-string name in
+          printer-sub (str^`<`^escaped-name^attribute-str^`>`^children-str^`</`^escaped-name^`>`) xs
+        )
+        | XMLText(xml-text) -> (
+          match xml-text with
+          | XMLTextString(text) -> printer-sub (str^(escape-string text)) xs
+          | XMLTextEntityValue(v) -> printer-sub (str^`&`^v^`;`) xs
+        )
+        | XMLProcessingInstructions(name, attributes) -> (
+          let attribute-str =
+            if List.length attributes == 0 then
+              empty-string
+            else
+              attributes
+              |> List.map (fun (name, literals) -> (escape-string name)^`=`^(print-literal literals))
+              |> List.fold-left (fun s1 s2 -> s1^space-string^s2) empty-string
+          in
+          let escaped-name = escape-string name in
+          printer-sub (str^`<?`^escaped-name^attribute-str^`?>`) xs
+        )
+        %| XMLDocTypeDecl(lst) -> printer-sub (str^`XMLDocTypeDecl`) xs
+      )
+    in
+    printer-sub empty-string xml
+
+end

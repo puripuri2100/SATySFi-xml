@@ -1,0 +1,14 @@
+@require: stdjareport
+@require: itemize
+@require: annot
+
+
+%@require: xml/xml
+@import: ../src/xml
+
+
+document (|
+  title = {satysfi-xml Manual};
+  author = {Naoki Kaneko a.k.a. "puripuri2100"};
+|) '<
+>
