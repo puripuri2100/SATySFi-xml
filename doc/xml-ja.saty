@@ -1,14 +1,106 @@
-@require: stdjareport
+@require: stdjabook
 @require: itemize
 @require: annot
-
+@require: code-printer/code-printer
+@require: code-printer/code-syntax
+@require: code-printer/code-theme
 
 %@require: xml/xml
 @import: ../src/xml
 
 
+let-block ctx +sc code = read-block ctx '<
+  +CodePrinter.code-printer ?:(
+    CodePrinter.default
+    |> CodePrinter.set-syntax CodeSyntax.satysfi
+    |> CodePrinter.set-theme CodeTheme.iceberg-light
+  ) (code);
+>
+
+let-block ctx +xc code = read-block ctx '<
+  +CodePrinter.code-printer ?:(
+    CodePrinter.default
+    |> CodePrinter.set-syntax CodeSyntax.xml
+    |> CodePrinter.set-theme CodeTheme.iceberg-light
+  ) (code);
+>
+
+in
+
 document (|
   title = {satysfi-xml Manual};
   author = {Naoki Kaneko a.k.a. "puripuri2100"};
+  show-title = true;
+  show-toc = false;
 |) '<
+  +section {概要} <
+    +p{このライブラリはXML文字列をパースしたり、逆にデータ構造をXML文字列に変換したりする関数を提供するライブラリです。}
+    +p{W3Cの公開しているXML 1.0\footnote{\href(`https://www.w3.org/TR/2008/REC-xml-20081126/`){https://www.w3.org/TR/2008/REC-xml-20081126/}}が要求している要件のほぼ全てに対応していますが、External Entitiesという外部リソースを参照するための仕様には対応していません。}
+  >
+  +section {提供するデータ構造} <
+    +p{以下の型をトップレベルで定義しています。}
+    +p{テキストを表す型として\inline-code(`xml-text`);という型を定義しています。\inline-code(`XMLTextString`);は素の文字列を、\inline-code(`XMLTextEntityValue`);は実体参照を表しています。よく使われる実体参照（角括弧やアンド記号、ユニコードスカラー値指定など）については参照されている値を取り出して\inline-code(`XMLTextString`);に含めています。}
+    +sc(`type xml-text =
+| XMLTextString of string
+| XMLTextEntityValue of string`);
+    +p{XMLの要素を表す型として\inline-code(`xml-element`);型を定義しています。\inline-code(`XMLTag`);はタグの構成を表しています。中の値はそれぞれ\enumerate{
+      * タグ名
+      * 属性のリスト
+      * 子要素のリスト
+    }となっています。\inline-code(`XMLText`);はその名の通りテキストを表します。\inline-code(`XMLProcessingInstructions`);は\inline-code(`<? xml-stylesheet type="text/css"?>`);のような処理命令を表します。中の値としてはそれぞれ\enumerate{
+      * タグ名
+      * 属性のリスト
+    }を表します。}
+    +sc(`type xml-element =
+| XMLTag of string * ((string * xml-text list) list) * (xml-element list)
+| XMLText of xml-text
+| XMLProcessingInstructions of string * ((string * xml-text list) list)`);
+    +p{パースの結果で出てくるXML構造体は\inline-code(`xml-element`);のリストです。}
+    +sc(`type xml = xml-element list`);
+    +p{解析に失敗した場合、失敗した理由を返します。それぞれの意味は\listing{
+      * \inline-code(`XMLParserErrorUnExpectedChar`);：来るはずのない文字が来た場合
+      * \inline-code(`XMLParserErrorUnExpectedString`);：文字列リテラル中に来るはずのない文字が来た場合
+      * \inline-code(`XMLParserErrorEOI`);：予期せぬ文字列の終了があった場合
+    }です。}
+    +sc(`type xml-parser-error =
+| XMLParserErrorUnExpectedChar of int * string
+| XMLParserErrorUnExpectedString of int * int * string
+| XMLParserErrorEOI`);
+  >
+  +section {提供する関数} <
+    +p{モジュールは\inline-code(`XML`);です。提供する関数は\listing{
+      * \inline-code(`parser : string -> xml xml-parser-error result`);
+      * \inline-code(`printer : xml -> string`);
+    }の2つです。\inline-code(`'ok 'err result`);型はsatysfi-baseライブラリ内の\inline-code(`base.satyg`);ファイル\footnote{\href(`https://github.com/nyuichi/satysfi-base/blob/master/src/result.satyg`){https://github.com/nyuichi/satysfi-base/blob/master/src/result.satyg}}内に定義されており、便利に操作するための関数は\inline-code(`result.satyg`);ファイル\footnote{\href(`https://github.com/nyuichi/satysfi-base/blob/master/src/result.satyg`){https://github.com/nyuichi/satysfi-base/blob/master/src/result.satyg}}で提供されています。}
+  >
+  +section {例} <
+    +xc(`<hoge>
+  <?xml-stylesheet <!-- c -->type="text/css" href="test.css"?>
+  fugahoge
+  <hoge2 test="hhh" test2="4&amp;&test;2"/>
+  fuga<![CDATA[<sni>]]>ho<!--c-->ge
+</hoge>`);
+      +p{というXMLコードを\inline-code(`XML.parser`);という関数でパースすると}
+      +sc(```Ok(XMLTag(`hoge`, [], [
+  XMLProcessingInstructions(`xml-stylesheet`, [
+    (`type`, [XMLTextString(`text/css`)]);
+    (`href`, [XMLTextString(`tst.css`)]);
+  ]);
+  XMLText(`
+  fugahoge
+  `);
+  XMLTag(`hoge2`, [
+    (`test`, [XMLTextString(`hhh`)]);
+    (`test2`, [
+      XMLTextString(`4&`);
+      XMLTextEntityValue(`test`);
+      XMLTextString(`2`);
+    )]);
+  ]);
+  XMLText(`
+  fuga<sni>hoge
+`);
+]))```);
+      +p{が返ってきます。}
+  >
 >

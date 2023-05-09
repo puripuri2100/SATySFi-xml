@@ -12,11 +12,12 @@ type xml-text =
 
 
 
+% 一旦実装しない
 % 参照の定義
 % https://www.w3.org/TR/REC-xml/#NT-EntityDecl
-type xml-entity-reference =
-  | XMLEntityReferenceString of string
-  | XMLEntityReferenceFile of string
+%type xml-entity-reference =
+%  | XMLEntityReferenceString of string
+%  | XMLEntityReferenceFile of string
 
 % 一旦実装しない
 % 文書型宣言

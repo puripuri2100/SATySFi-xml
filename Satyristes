@@ -40,4 +40,5 @@
     ((xml ()) ; the main library
      (dist ()) ; Standard library
      (base ()) ; Base library
+     (code-printer ())
     )))
