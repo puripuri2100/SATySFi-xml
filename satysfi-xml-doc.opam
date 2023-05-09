@@ -1,6 +1,6 @@
 opam-version: "2.0"
 name: "satysfi-xml-doc"
-version: "1.0.2"
+version: "1.0.3"
 synopsis: "Document of SATySFi-xml"
 description: """
 Document of SATySFi-xml.

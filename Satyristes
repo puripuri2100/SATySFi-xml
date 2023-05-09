@@ -6,7 +6,7 @@
   ;; Library name
   (name "xml")
   ;; Library version
-  (version "1.0.0")
+  (version "1.0.3")
   ;; Files
   (sources
     ((packageDir "src")))
@@ -23,7 +23,7 @@
   ;; Library doc name
   (name "xml-doc")
   ;; Library version
-  (version "1.0.0")
+  (version "1.0.3")
   ;; Working directory to build docs
   (workingDirectory "doc")
   ;; Build commands
