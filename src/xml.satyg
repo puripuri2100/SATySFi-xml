@@ -18,16 +18,18 @@ type xml-entity-reference =
   | XMLEntityReferenceString of string
   | XMLEntityReferenceFile of string
 
-%%% https://www.w3.org/TR/REC-xml/#NT-ExternalID
-type xml-external-id =
-  | XMLExternalIDSystem of string
-  | XMLExternalIDPublic of string * string
+% 一旦実装しない
+% 文書型宣言
+% https://www.w3.org/TR/REC-xml/#NT-ExternalID
+%type xml-external-id =
+%  | XMLExternalIDSystem of string
+%  | XMLExternalIDPublic of string * string
 
 type xml-element =
   | XMLTag of string * ((string * xml-text list) list) * (xml-element list) % 要素名 * 属性 * 子要素
   | XMLText of xml-text % テキストもしくは実体参照
   | XMLProcessingInstructions of string * ((string * xml-text list) list) % 処理命令
-  | XMLDocTypeDecl of string * (xml-external-id option) * ( list)
+%  | XMLDocTypeDecl of string * (xml-external-id option) * ( list)
 
 type xml = xml-element list
 
